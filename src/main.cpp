@@ -1,31 +1,45 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
-// #include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
+#include <ESP8266mDNS.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+
+const int LED = 2;
+/*
+ * WiFi network credentials
+ */
+const char* ssid = "";
+const char* password = "";
 /*
  * Define some global variables for handling connections
  */
 WiFiServer wifi_server(6666);
 WiFiClient client;
-
-// const char* ssid = "Atomlaser";
-// const char* password = "becbecbec";
-
-const char* ssid = "AtomopticsLAB-2G";
-const char* password = "BeCbecBeC";
-
-const int LED = 2;
-
-
+String recv_string = "";
+/*
+ * Filtering settings
+ */
+unsigned long filter_delay = 10;  //10 ms
+float filter_weight = 2*3.14*((float)filter_delay)/1000; //1 Hz filter
+int avalue_int = 0;
+float avalue_volts = 0;
+float avalue_avg = 0;
+unsigned long current_millis = 0;
+unsigned long previous_millis = 0;
+/*
+ * Setup phase
+ */
 void setup() {
   pinMode(LED,OUTPUT);
+  digitalWrite(LED,0);
   //Start the serial connection
   Serial.setTimeout(20);
   Serial.begin(115200);
   Serial.println("Booting...");
   //Connect to the WiFi
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname("esp-power-monitor");
   WiFi.begin(ssid,password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
@@ -34,9 +48,11 @@ void setup() {
 
   Serial.println(WiFi.localIP());
 
-  // if (!MDNS.begin("esp8266test")) {
-  //   Serial.println("Error setting up MDNS responder!");
-  // }
+  if (!MDNS.begin("esp-power-monitor")) {
+    Serial.println("Error setting up MDNS responder!");
+  } else {
+    Serial.println("mDNS started");
+  }
   /*
    * This stuff allows for "over-the-air" updates via WiFi.
    */
@@ -60,13 +76,29 @@ void setup() {
   ArduinoOTA.begin();
   //Start the web server
   wifi_server.begin();
-
+  //Get the current time
+  current_millis = millis();
 }
 
 void loop() {
   //This is needed for OTA updates to work
   ArduinoOTA.handle();
-  //Check if a client has connected
+  /*
+   * This section reads data from the ADC and averages it without introducing a delay
+   */
+  current_millis = millis();
+  if (current_millis - previous_millis > filter_delay) {
+    previous_millis = current_millis;
+    avalue_int = analogRead(A0);
+    avalue_volts = ((float) avalue_int)/1024*6;
+    avalue_avg = avalue_avg/(1 + filter_weight) + filter_weight/(1 + filter_weight)*avalue_volts;
+  } else if (current_millis < previous_millis) {
+    previous_millis = 0;
+  }
+  
+  /*
+   * This section connects to a client and returns averaged data
+   */
   client = wifi_server.available();
   if (client) {
     //Only executes when a client is connected
@@ -77,10 +109,16 @@ void loop() {
       while (client.available() > 0) {
         //Grab data from client
         char c = client.read();
-        Serial.write(c);
-        String resp = Serial.readString();
-        client.print(resp);
-        digitalWrite(LED,0);
+        if (c == '\n') {
+          if (recv_string == "get") {
+            client.print(String(avalue_avg,6) + "\r\n");
+            recv_string = "";
+          } else {
+            recv_string = "";
+          }
+        } else {
+          recv_string += c;
+        }
       }
       //Delay between reads (10 ms)
       delay(10);
@@ -89,6 +127,8 @@ void loop() {
     digitalWrite(LED,0);
     // Serial.println("Client disconnected");
   } else {
-    digitalWrite(LED,1);
+    recv_string = "";
+    digitalWrite(LED,0);
   }
+  
 }
